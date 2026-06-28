@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mimicode/mcp_bridge/internal/buildinfo"
 	"github.com/mimicode/mcp_bridge/internal/config"
@@ -25,6 +26,7 @@ type App struct {
 	configPath string
 	basePath   string
 	uiHandler  http.Handler
+	callLogs   *CallLogBroker
 
 	mu     sync.RWMutex
 	routes map[string]*RouteBridge
@@ -43,10 +45,12 @@ func NewApp(cfg *config.Runtime, logger *slog.Logger, factory BackendFactory) *A
 		configPath: cfg.SourcePath,
 		basePath:   cfg.BasePath,
 		uiHandler:  uiHandler,
+		callLogs:   NewCallLogBroker(),
 		routes:     make(map[string]*RouteBridge, len(cfg.Servers)),
 	}
 	for _, route := range cfg.Servers {
 		bridge := NewRouteBridge(route, logger, factory)
+		bridge.SetCallLogBroker(app.callLogs)
 		app.routes[route.Path] = bridge
 		app.order = append(app.order, bridge)
 	}
@@ -67,6 +71,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	case req.URL.Path == "/_admin/api/test":
 		a.handleTestAPI(w, req)
+		return
+	case req.URL.Path == "/_admin/api/logs/stream":
+		a.handleCallLogsStream(w, req)
 		return
 	case req.URL.Path == "/_admin":
 		http.Redirect(w, req, "/_admin/", http.StatusPermanentRedirect)
@@ -100,9 +107,31 @@ func (a *App) Warmup(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	return a.Shutdown(context.Background())
+}
+
+func (a *App) Shutdown(ctx context.Context) error {
+	routes := a.routeSnapshot()
+	if len(routes) == 0 {
+		return nil
+	}
+
+	errCh := make(chan error, len(routes))
+	var wg sync.WaitGroup
+	for _, route := range routes {
+		wg.Add(1)
+		go func(route *RouteBridge) {
+			defer wg.Done()
+			errCh <- route.Shutdown(ctx)
+		}(route)
+	}
+
+	wg.Wait()
+	close(errCh)
+
 	var joined error
-	for _, route := range a.routeSnapshot() {
-		if err := route.Close(); err != nil {
+	for err := range errCh {
+		if err != nil {
 			joined = errors.Join(joined, err)
 		}
 	}
@@ -143,6 +172,7 @@ func (a *App) handleIndex(w http.ResponseWriter, req *http.Request) {
 		"health":    "/healthz",
 		"routes":    a.routeInfos(),
 		"admin_api": "/_admin/api/config",
+		"logs_api":  "/_admin/api/logs/stream",
 	})
 }
 
@@ -170,6 +200,7 @@ func (a *App) Reload(ctx context.Context, cfg *config.Runtime) error {
 		}
 
 		bridge := NewRouteBridge(routeCfg, a.logger, a.factory)
+		bridge.SetCallLogBroker(a.callLogs)
 		nextMap[routeCfg.Path] = bridge
 		nextOrder = append(nextOrder, bridge)
 	}
@@ -398,6 +429,59 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, req *http.Request) {
 		response["warning"] = reloadErr.Error()
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *App) handleCallLogsStream(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	entries, unsubscribe := a.callLogs.Subscribe()
+	defer unsubscribe()
+
+	if err := writeSSEComment(w, "connected"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-req.Context().Done():
+			return
+		case entry, ok := <-entries:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			if err := writeSSE(w, payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if err := writeSSEComment(w, "ping"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (a *App) configFilePath() string {

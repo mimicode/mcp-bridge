@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mimicode/mcp_bridge/internal/buildinfo"
 	"github.com/mimicode/mcp_bridge/internal/bridge"
+	"github.com/mimicode/mcp_bridge/internal/buildinfo"
 	"github.com/mimicode/mcp_bridge/internal/config"
 )
 
@@ -42,11 +42,6 @@ func main() {
 	}
 
 	app := bridge.NewApp(cfg, logger, nil)
-	defer func() {
-		if err := app.Close(); err != nil {
-			logger.Warn("close app", "error", err)
-		}
-	}()
 
 	warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	if err := app.Warmup(warmupCtx); err != nil {
@@ -69,10 +64,10 @@ func main() {
 		}
 	}()
 
-	waitForShutdown(logger, server)
+	waitForShutdown(logger, server, app)
 }
 
-func waitForShutdown(logger *slog.Logger, server *http.Server) {
+func waitForShutdown(logger *slog.Logger, server *http.Server, app *bridge.App) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(stop)
@@ -83,12 +78,26 @@ func waitForShutdown(logger *slog.Logger, server *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		logger.Error("graceful shutdown failed", "error", err)
+	serverErrCh := make(chan error, 1)
+	appErrCh := make(chan error, 1)
+
+	go func() {
+		serverErrCh <- server.Shutdown(ctx)
+	}()
+	go func() {
+		appErrCh <- app.Shutdown(ctx)
+	}()
+
+	serverErr := <-serverErrCh
+	if serverErr != nil {
+		logger.Error("graceful http shutdown failed", "error", serverErr)
 		if closeErr := server.Close(); closeErr != nil {
-			logger.Error("force close failed", "error", closeErr)
+			logger.Error("force close http server failed", "error", closeErr)
 		}
-		return
+	}
+
+	if appErr := <-appErrCh; appErr != nil {
+		logger.Error("graceful mcp shutdown failed", "error", appErr)
 	}
 
 	logger.Info("server stopped", "status", fmt.Sprintf("graceful within %s", 15*time.Second))

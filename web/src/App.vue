@@ -4,17 +4,19 @@
       <div class="hero-content">
         <div>
           <h1>MCP Bridge 管理台</h1>
-          <p>支持 MCP 列表检索、启用状态筛选、路由状态查看和 Agent 配置预览复制。</p>
+          <p>支持 MCP 列表检索、启用状态筛选、路由状态查看、实时调用日志和 Agent 配置预览复制。</p>
         </div>
-        <div class="theme-control">
-          <span class="theme-label">主题</span>
-          <n-select
-            :value="themePreference"
-            :options="themeOptions"
-            size="small"
-            style="width: 160px"
-            @update:value="$emit('update:themePreference', $event)"
-          />
+        <div class="hero-controls">
+          <div class="theme-control">
+            <span class="theme-label">主题</span>
+            <n-select
+              :value="themePreference"
+              :options="themeOptions"
+              size="small"
+              style="width: 160px"
+              @update:value="$emit('update:themePreference', $event)"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -89,6 +91,8 @@
       @clear-filters="clearFilters"
     />
 
+    <call-log-panel />
+
     <mcp-editor-modal
       v-model:show="editorVisible"
       :server="editingServer"
@@ -108,6 +112,7 @@
 import { computed, ref } from "vue";
 import { NAlert, NSelect, useDialog, useMessage } from "naive-ui";
 import AgentConfigPreviewModal from "@/components/AgentConfigPreviewModal.vue";
+import CallLogPanel from "@/components/CallLogPanel.vue";
 import McpEditorModal from "@/components/McpEditorModal.vue";
 import McpServerTable from "@/components/McpServerTable.vue";
 import {
@@ -435,6 +440,14 @@ reloadConfig();
   line-height: 1.7;
 }
 
+.hero-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .theme-control {
   display: flex;
   align-items: center;
@@ -521,6 +534,11 @@ reloadConfig();
 
   .hero-content {
     flex-direction: column;
+  }
+
+  .hero-controls {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .summary-grid {

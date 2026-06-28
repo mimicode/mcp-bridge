@@ -4,7 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -18,6 +21,7 @@ type fakeBackend struct {
 	resourceTemplates []mcp.ResourceTemplate
 	prompts           []mcp.Prompt
 	notifications     func(notification mcp.JSONRPCNotification)
+	closeFn           func() error
 }
 
 func (f *fakeBackend) Initialize(context.Context, mcp.InitializeRequest) (*mcp.InitializeResult, error) {
@@ -62,7 +66,12 @@ func (f *fakeBackend) OnNotification(handler func(notification mcp.JSONRPCNotifi
 	f.notifications = handler
 }
 
-func (f *fakeBackend) Close() error { return nil }
+func (f *fakeBackend) Close() error {
+	if f.closeFn != nil {
+		return f.closeFn()
+	}
+	return nil
+}
 
 func TestRouteBridgeWarmupMirrorsBackendDescriptors(t *testing.T) {
 	backend := &fakeBackend{
@@ -133,5 +142,94 @@ func TestRouteBridgeWarmupMirrorsBackendDescriptors(t *testing.T) {
 	}
 	if info.BackendName != "fake-backend" {
 		t.Fatalf("unexpected backend name: %q", info.BackendName)
+	}
+}
+
+func TestRouteBridgeShutdownClosesStartedBackend(t *testing.T) {
+	var closed atomic.Bool
+	backend := &fakeBackend{
+		initResult: &mcp.InitializeResult{
+			ServerInfo: mcp.Implementation{Name: "fake-backend", Version: "1.0.0"},
+		},
+		closeFn: func() error {
+			closed.Store(true)
+			return nil
+		},
+	}
+
+	factory := func(context.Context, config.Route, *slog.Logger) (Backend, error) {
+		return backend, nil
+	}
+
+	route := NewRouteBridge(config.Route{
+		Name:    "fake",
+		Path:    "/mcp/fake",
+		Command: "unused",
+		Timeout: config.DefaultTimeout,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), factory)
+
+	if err := route.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := route.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if !closed.Load() {
+		t.Fatal("expected backend Close to be called during shutdown")
+	}
+}
+
+func TestAppShutdownNotifiesRoutesConcurrently(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+
+	newRoute := func(name string) *RouteBridge {
+		route := NewRouteBridge(config.Route{
+			Name:    name,
+			Path:    "/mcp/" + name,
+			Command: "unused",
+			Timeout: config.DefaultTimeout,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+		route.backend = &fakeBackend{
+			closeFn: func() error {
+				started <- name
+				<-release
+				return nil
+			},
+		}
+		route.handler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+		return route
+	}
+
+	app := &App{
+		routes: map[string]*RouteBridge{},
+		order: []*RouteBridge{
+			newRoute("one"),
+			newRoute("two"),
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Shutdown(context.Background())
+	}()
+
+	seen := map[string]struct{}{}
+	deadline := time.After(time.Second)
+	for len(seen) < 2 {
+		select {
+		case name := <-started:
+			seen[name] = struct{}{}
+		case <-deadline:
+			t.Fatal("expected all routes to receive shutdown notification concurrently")
+		}
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
 	}
 }

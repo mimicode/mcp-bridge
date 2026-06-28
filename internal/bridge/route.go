@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -42,6 +43,7 @@ type RouteBridge struct {
 	proxy      *mcpserver.MCPServer
 	handler    http.Handler
 	lastError  error
+	callLogs   *CallLogBroker
 }
 
 func NewRouteBridge(route config.Route, logger *slog.Logger, factory BackendFactory) *RouteBridge {
@@ -55,30 +57,78 @@ func NewRouteBridge(route config.Route, logger *slog.Logger, factory BackendFact
 	}
 }
 
+func (r *RouteBridge) SetCallLogBroker(broker *CallLogBroker) {
+	r.callLogs = broker
+}
+
 func (r *RouteBridge) Warmup(ctx context.Context) error {
 	return r.ensureReady(ctx)
 }
 
 func (r *RouteBridge) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if err := r.ensureReady(req.Context()); err != nil {
-			http.Error(w, fmt.Sprintf("backend %q is unavailable: %v", r.route.Name, err), http.StatusBadGateway)
+		if r.callLogs == nil || !r.callLogs.HasSubscribers() {
+			r.serveHTTP(w, req)
 			return
 		}
 
-		handler := r.handlerSnapshot()
-		if handler == nil {
-			http.Error(w, "route handler is not ready", http.StatusServiceUnavailable)
-			return
-		}
-		handler.ServeHTTP(w, req)
+		requestBody, rpcMethod := captureRequestBody(req)
+		startedAt := time.Now()
+		capture := newCaptureResponseWriter(w)
+
+		r.serveHTTP(capture, req)
+		r.callLogs.Publish(newCallLogEntry(
+			r.route.Name,
+			r.route.Path,
+			req.Method,
+			rpcMethod,
+			requestBody,
+			capture.BodyText(),
+			capture.Status(),
+			startedAt,
+		))
 	})
 }
 
+func (r *RouteBridge) serveHTTP(w http.ResponseWriter, req *http.Request) {
+	if err := r.ensureReady(req.Context()); err != nil {
+		http.Error(w, fmt.Sprintf("backend %q is unavailable: %v", r.route.Name, err), http.StatusBadGateway)
+		return
+	}
+
+	handler := r.handlerSnapshot()
+	if handler == nil {
+		http.Error(w, "route handler is not ready", http.StatusServiceUnavailable)
+		return
+	}
+	handler.ServeHTTP(w, req)
+}
+
 func (r *RouteBridge) Close() error {
-	r.stateMu.Lock()
-	defer r.stateMu.Unlock()
-	return r.closeBackendLocked(nil)
+	backend := r.detachBackend(nil)
+	if backend == nil {
+		return nil
+	}
+	return backend.Close()
+}
+
+func (r *RouteBridge) Shutdown(ctx context.Context) error {
+	backend := r.detachBackend(fmt.Errorf("backend shutdown requested"))
+	if backend == nil {
+		return nil
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- backend.Close()
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("shutdown backend %q: %w", r.route.Name, ctx.Err())
+	}
 }
 
 func (r *RouteBridge) Info() RouteInfo {
@@ -439,15 +489,30 @@ func (r *RouteBridge) invalidateBackend(current Backend, cause error) error {
 	return r.closeBackendLocked(cause)
 }
 
-func (r *RouteBridge) closeBackendLocked(cause error) error {
-	var err error
-	if r.backend != nil {
-		err = r.backend.Close()
-	}
+func (r *RouteBridge) detachBackend(cause error) Backend {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+
+	backend := r.backend
 	r.backend = nil
 	r.initResult = nil
 	if cause != nil {
 		r.lastError = cause
+	}
+	return backend
+}
+
+func (r *RouteBridge) closeBackendLocked(cause error) error {
+	backend := r.backend
+	r.backend = nil
+	r.initResult = nil
+	if cause != nil {
+		r.lastError = cause
+	}
+
+	var err error
+	if backend != nil {
+		err = backend.Close()
 	}
 	return err
 }
