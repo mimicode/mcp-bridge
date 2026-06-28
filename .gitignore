@@ -1,3 +1,5 @@
 release/
 web/node_modules/
 internal/ui/dist/
+.DS_Store
+config.json

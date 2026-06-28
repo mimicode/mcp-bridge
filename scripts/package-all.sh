@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="${APP_NAME:-mcp-bridge}"
-VERSION="${VERSION:-$(date +%Y%m%d-%H%M%S)}"
+VERSION="${VERSION:-dev}"
 COMMIT="${COMMIT:-$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/release}"
@@ -83,6 +83,7 @@ main() {
   require_command tar
   require_command zip
 
+  rm -rf "${OUT_DIR}"
   mkdir -p "${OUT_DIR}"
 
   build_frontend
