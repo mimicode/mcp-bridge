@@ -5,11 +5,6 @@
         <h1>MCP Bridge 管理台</h1>
         <p>支持 MCP 列表检索、启用状态筛选、快捷复制路由与未保存变更提示，保存后仅重载 MCP 配置。</p>
       </div>
-      <div class="hero-actions">
-        <n-button secondary @click="reloadConfig" :loading="loading">重新读取</n-button>
-        <n-button type="primary" @click="openCreateModal">添加 MCP</n-button>
-        <n-button type="success" @click="saveConfig" :loading="saving" :disabled="!isDirty && !saving">保存并热更新</n-button>
-      </div>
     </div>
 
     <n-alert
@@ -67,7 +62,15 @@
             <h2>已添加 MCP</h2>
             <p>通过表格统一管理所有 MCP，支持搜索、筛选、复制和编辑。</p>
           </div>
-          <div class="table-toolbar">
+          <div class="section-actions">
+            <n-button secondary @click="reloadConfig" :loading="loading">重新读取</n-button>
+            <n-button type="primary" @click="openCreateModal">添加 MCP</n-button>
+            <n-button type="success" @click="saveConfig" :loading="saving" :disabled="!isDirty && !saving">保存并热更新</n-button>
+          </div>
+        </div>
+
+        <div class="table-toolbar">
+          <div class="table-toolbar-filters">
             <n-input
               v-model:value="keyword"
               clearable
@@ -83,12 +86,32 @@
         </div>
 
         <n-data-table
+          v-if="filteredRows.length > 0"
           :columns="serverColumns"
           :data="filteredRows"
           :bordered="false"
           :single-line="false"
           size="small"
         />
+        <n-empty v-else class="table-empty" :description="emptyStateDescription">
+          <template #default>
+            <div class="empty-title">{{ emptyStateTitle }}</div>
+            <div class="empty-desc">{{ emptyStateDescription }}</div>
+          </template>
+          <template #extra>
+            <div class="empty-actions">
+              <n-button v-if="servers.length === 0 || enabledCount === 0" type="primary" @click="openCreateModal">
+                添加 MCP
+              </n-button>
+              <n-button v-if="servers.length > 0 && filteredRows.length === 0" secondary @click="clearFilters">
+                清空筛选
+              </n-button>
+              <n-button v-if="servers.length > 0 && enabledCount === 0" type="success" @click="saveConfig" :loading="saving">
+                保存并热更新
+              </n-button>
+            </div>
+          </template>
+        </n-empty>
       </div>
 
       <div class="card">
@@ -122,6 +145,7 @@ import {
   NAlert,
   NButton,
   NDataTable,
+  NEmpty,
   NInput,
   NSelect,
   NTag,
@@ -165,6 +189,24 @@ const enabledCount = computed(() => servers.value.filter(item => item.enabled).l
 const currentSnapshot = computed(() => stringifyConfig(configFromServers(servers.value)));
 const isDirty = computed(() => snapshotReady.value && currentSnapshot.value !== loadedSnapshot.value);
 const showNoEnabledAlert = computed(() => snapshotReady.value && enabledCount.value === 0);
+const emptyStateTitle = computed(() => {
+  if (servers.value.length === 0) {
+    return "还没有配置任何 MCP";
+  }
+  if (enabledCount.value === 0) {
+    return "当前没有启用的 MCP";
+  }
+  return "没有匹配的 MCP";
+});
+const emptyStateDescription = computed(() => {
+  if (servers.value.length === 0) {
+    return "先添加一个 MCP 配置，再保存并热更新。";
+  }
+  if (enabledCount.value === 0) {
+    return "当前所有 MCP 都处于禁用状态，保存后不会暴露任何 MCP 路由。";
+  }
+  return "当前筛选条件下没有匹配项，可以清空筛选后再查看。";
+});
 
 const filteredRows = computed(() => {
   const term = keyword.value.trim().toLowerCase();
@@ -624,9 +666,6 @@ reloadConfig();
 
 .hero {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
   margin-bottom: 16px;
 }
 
@@ -640,13 +679,6 @@ reloadConfig();
   margin: 0;
   color: #94a3b8;
   line-height: 1.7;
-}
-
-.hero-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .dirty-alert {
@@ -725,11 +757,24 @@ reloadConfig();
   margin-bottom: 16px;
 }
 
+.section-actions,
 .table-toolbar {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.table-toolbar {
+  margin-bottom: 16px;
+}
+
+.table-toolbar-filters {
+  display: flex;
+  gap: 12px;
+  align-items: center;
   width: min(540px, 100%);
+  flex-wrap: wrap;
 }
 
 :deep(.n-data-table) {
@@ -743,6 +788,28 @@ reloadConfig();
 .action-cell {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.table-empty {
+  padding: 24px 0;
+}
+
+.empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.empty-desc {
+  color: #94a3b8;
+  line-height: 1.6;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
   flex-wrap: wrap;
 }
 
@@ -761,9 +828,13 @@ reloadConfig();
     flex-direction: column;
   }
 
+  .section-actions,
   .table-toolbar {
     width: 100%;
-    flex-wrap: wrap;
+  }
+
+  .table-toolbar-filters {
+    width: 100%;
   }
 }
 
@@ -773,12 +844,7 @@ reloadConfig();
   }
 
   .hero {
-    flex-direction: column;
-  }
-
-  .hero-actions {
-    width: 100%;
-    justify-content: flex-start;
+    display: block;
   }
 
   .summary-grid {
