@@ -99,7 +99,7 @@ npm run build
 - 在 `web/` 下执行 `npm ci && npm run build`
 - 可选执行 `go test ./...`
 - 交叉编译 macOS / Linux / Windows 二进制
-- 将 `README.md` 和 `config.example.json` 一并打包
+- 将 `README.md` 和空白 `config.json` 一并打包
 - 在打包前清空并重建 `release/` 目录
 
 默认目标平台：
@@ -121,6 +121,23 @@ VERSION=v0.1.0 TARGETS="darwin/arm64 linux/amd64 windows/amd64" ./scripts/packag
 
 - `VERSION=dev`
 - 若未覆盖 `VERSION`，重复构建时输出文件名保持稳定
+- 若当前提交正好命中 Git tag，脚本会自动使用该 tag 作为版本号
+
+### GitHub Release 自动发布
+
+仓库内置了 GitHub Actions 发布工作流：
+
+- 当推送 `v*` 标签时会自动触发
+- 自动构建 macOS / Linux / Windows 全部打包产物
+- 自动创建或更新对应的 GitHub Release
+- Release 产物文件名会自动带上标签版本，而不是 `dev`
+
+示例：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## 构建信息
 

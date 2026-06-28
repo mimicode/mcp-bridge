@@ -4,7 +4,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="${APP_NAME:-mcp-bridge}"
-VERSION="${VERSION:-dev}"
 COMMIT="${COMMIT:-$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/release}"
@@ -18,6 +17,25 @@ require_command() {
   fi
 }
 
+resolve_version() {
+  if [[ -n "${VERSION:-}" ]]; then
+    echo "${VERSION}"
+    return
+  fi
+
+  if [[ "${GITHUB_REF_TYPE:-}" == "tag" && -n "${GITHUB_REF_NAME:-}" ]]; then
+    echo "${GITHUB_REF_NAME}"
+    return
+  fi
+
+  if git -C "${ROOT_DIR}" describe --tags --exact-match >/dev/null 2>&1; then
+    git -C "${ROOT_DIR}" describe --tags --exact-match
+    return
+  fi
+
+  echo "dev"
+}
+
 build_frontend() {
   require_command npm
 
@@ -27,6 +45,15 @@ build_frontend() {
     npm ci
     npm run build
   )
+}
+
+write_release_config() {
+  local file_path="$1"
+  cat >"${file_path}" <<'EOF'
+{
+  "mcpServers": {}
+}
+EOF
 }
 
 run_tests() {
@@ -64,7 +91,7 @@ package_target() {
   )
 
   cp "${ROOT_DIR}/README.md" "${work_dir}/README.md"
-  cp "${ROOT_DIR}/config.example.json" "${work_dir}/config.example.json"
+  write_release_config "${work_dir}/config.json"
 
   if [[ "${goos}" == "windows" ]]; then
     (
@@ -82,6 +109,9 @@ main() {
   require_command go
   require_command tar
   require_command zip
+
+  VERSION="$(resolve_version)"
+  export VERSION
 
   rm -rf "${OUT_DIR}"
   mkdir -p "${OUT_DIR}"
