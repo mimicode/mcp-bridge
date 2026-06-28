@@ -1,9 +1,21 @@
 <template>
-  <div class="page">
+  <div class="page" :class="`theme-${resolvedTheme}`">
     <div class="hero card">
-      <div>
-        <h1>MCP Bridge 管理台</h1>
-        <p>支持 MCP 列表检索、启用状态筛选、快捷复制路由与未保存变更提示，保存后仅重载 MCP 配置。</p>
+      <div class="hero-content">
+        <div>
+          <h1>MCP Bridge 管理台</h1>
+          <p>支持 MCP 列表检索、启用状态筛选、路由状态查看和 Agent 配置预览复制。</p>
+        </div>
+        <div class="theme-control">
+          <span class="theme-label">主题</span>
+          <n-select
+            :value="themePreference"
+            :options="themeOptions"
+            size="small"
+            style="width: 160px"
+            @update:value="$emit('update:themePreference', $event)"
+          />
+        </div>
       </div>
     </div>
 
@@ -55,104 +67,69 @@
       </div>
     </div>
 
-    <div class="content-grid">
-      <div class="card">
-        <div class="section-head">
-          <div>
-            <h2>已添加 MCP</h2>
-            <p>通过表格统一管理所有 MCP，支持搜索、筛选、复制和编辑。</p>
-          </div>
-          <div class="section-actions">
-            <n-button secondary @click="reloadConfig" :loading="loading">重新读取</n-button>
-            <n-button type="primary" @click="openCreateModal">添加 MCP</n-button>
-            <n-button type="success" @click="saveConfig" :loading="saving" :disabled="!isDirty && !saving">保存并热更新</n-button>
-          </div>
-        </div>
-
-        <div class="table-toolbar">
-          <div class="table-toolbar-filters">
-            <n-input
-              v-model:value="keyword"
-              clearable
-              placeholder="搜索名称、命令、路由、描述"
-            />
-            <n-select
-              v-model:value="statusFilter"
-              :options="statusOptions"
-              style="width: 160px"
-            />
-            <n-button quaternary @click="clearFilters">清空筛选</n-button>
-          </div>
-        </div>
-
-        <n-data-table
-          v-if="filteredRows.length > 0"
-          :columns="serverColumns"
-          :data="filteredRows"
-          :bordered="false"
-          :single-line="false"
-          size="small"
-        />
-        <n-empty v-else class="table-empty" :description="emptyStateDescription">
-          <template #default>
-            <div class="empty-title">{{ emptyStateTitle }}</div>
-            <div class="empty-desc">{{ emptyStateDescription }}</div>
-          </template>
-          <template #extra>
-            <div class="empty-actions">
-              <n-button v-if="servers.length === 0 || enabledCount === 0" type="primary" @click="openCreateModal">
-                添加 MCP
-              </n-button>
-              <n-button v-if="servers.length > 0 && filteredRows.length === 0" secondary @click="clearFilters">
-                清空筛选
-              </n-button>
-              <n-button v-if="servers.length > 0 && enabledCount === 0" type="success" @click="saveConfig" :loading="saving">
-                保存并热更新
-              </n-button>
-            </div>
-          </template>
-        </n-empty>
-      </div>
-
-      <div class="card">
-        <div class="section-head">
-          <div>
-            <h2>路由状态</h2>
-            <p>展示当前后端热更新后的路由连接状态，并可快捷复制 HTTP 入口。</p>
-          </div>
-        </div>
-        <n-data-table
-          :columns="routeColumns"
-          :data="routes"
-          :bordered="false"
-          :single-line="false"
-          size="small"
-        />
-      </div>
-    </div>
+    <mcp-server-table
+      v-model:keyword="keyword"
+      v-model:status-filter="statusFilter"
+      :servers="servers"
+      :routes="routes"
+      :loading="loading"
+      :saving="saving"
+      :is-dirty="isDirty"
+      :testing-key="testingKey"
+      @reload="reloadConfig"
+      @save="saveConfig"
+      @open-create="openCreateModal"
+      @edit="openEditModal"
+      @test="testServer"
+      @duplicate-create="openDuplicateCreateModal"
+      @remove="removeServer"
+      @copy-endpoint="handleCopyEndpoint"
+      @preview-agent-config="openAgentConfigPreview"
+      @preview-all-agent-config="openAllAgentConfigPreview"
+      @clear-filters="clearFilters"
+    />
 
     <mcp-editor-modal
       v-model:show="editorVisible"
       :server="editingServer"
       @save="handleSaveServer"
     />
+
+    <agent-config-preview-modal
+      v-model:show="previewVisible"
+      :title="previewTitle"
+      :content="previewContent"
+      @copy="copyPreviewContent"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, h, ref } from "vue";
-import {
-  NAlert,
-  NButton,
-  NDataTable,
-  NEmpty,
-  NInput,
-  NSelect,
-  NTag,
-  useDialog,
-  useMessage
-} from "naive-ui";
+import { computed, ref } from "vue";
+import { NAlert, NSelect, useDialog, useMessage } from "naive-ui";
+import AgentConfigPreviewModal from "@/components/AgentConfigPreviewModal.vue";
 import McpEditorModal from "@/components/McpEditorModal.vue";
+import McpServerTable from "@/components/McpServerTable.vue";
+import {
+  buildAgentConfigPayload,
+  configFromServers,
+  parseConfigContent,
+  resolveServerPath,
+  stringifyConfig
+} from "@/lib/admin";
+
+defineProps({
+  themePreference: {
+    type: String,
+    default: "light"
+  },
+  resolvedTheme: {
+    type: String,
+    default: "light"
+  }
+});
+
+defineEmits(["update:themePreference"]);
 
 const message = useMessage();
 const dialog = useDialog();
@@ -160,6 +137,10 @@ const dialog = useDialog();
 const loading = ref(false);
 const saving = ref(false);
 const editorVisible = ref(false);
+const previewVisible = ref(false);
+const previewTitle = ref("");
+const previewContent = ref("");
+const previewSuccessMessage = ref("配置已复制");
 const editingIndex = ref(-1);
 const editingServer = ref(null);
 const configPath = ref("");
@@ -177,11 +158,10 @@ const versionInfo = ref({
   commit: "",
   buildTime: ""
 });
-
-const statusOptions = [
-  { label: "全部状态", value: "all" },
-  { label: "仅启用", value: "enabled" },
-  { label: "仅禁用", value: "disabled" }
+const themeOptions = [
+  { label: "亮色", value: "light" },
+  { label: "暗黑", value: "dark" },
+  { label: "跟随系统", value: "system" }
 ];
 
 const readyCount = computed(() => routes.value.filter(item => item.ready).length);
@@ -189,279 +169,15 @@ const enabledCount = computed(() => servers.value.filter(item => item.enabled).l
 const currentSnapshot = computed(() => stringifyConfig(configFromServers(servers.value)));
 const isDirty = computed(() => snapshotReady.value && currentSnapshot.value !== loadedSnapshot.value);
 const showNoEnabledAlert = computed(() => snapshotReady.value && enabledCount.value === 0);
-const emptyStateTitle = computed(() => {
-  if (servers.value.length === 0) {
-    return "还没有配置任何 MCP";
-  }
-  if (enabledCount.value === 0) {
-    return "当前没有启用的 MCP";
-  }
-  return "没有匹配的 MCP";
-});
-const emptyStateDescription = computed(() => {
-  if (servers.value.length === 0) {
-    return "先添加一个 MCP 配置，再保存并热更新。";
-  }
-  if (enabledCount.value === 0) {
-    return "当前所有 MCP 都处于禁用状态，保存后不会暴露任何 MCP 路由。";
-  }
-  return "当前筛选条件下没有匹配项，可以清空筛选后再查看。";
-});
-
-const filteredRows = computed(() => {
-  const term = keyword.value.trim().toLowerCase();
-  return servers.value
-    .map((server, index) => ({
-      ...server,
-      rowKey: `${server.name || "unnamed"}-${index}`,
-      index
-    }))
-    .filter(row => {
-      if (statusFilter.value === "enabled" && !row.enabled) {
-        return false;
-      }
-      if (statusFilter.value === "disabled" && row.enabled) {
-        return false;
-      }
-      if (!term) {
-        return true;
-      }
-      const haystack = [
-        row.name,
-        row.command,
-        row.path || autoPathPreview(row.name),
-        row.description
-      ]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(term);
-    });
-});
-
-const serverColumns = [
-  {
-    title: "名称",
-    key: "name",
-    minWidth: 180,
-    render(row) {
-      return row.name || "-";
-    }
-  },
-  {
-    title: "启用",
-    key: "enabled",
-    width: 90,
-    render(row) {
-      return h(
-        NTag,
-        { type: row.enabled ? "success" : "warning", bordered: false },
-        { default: () => (row.enabled ? "是" : "否") }
-      );
-    }
-  },
-  {
-    title: "命令",
-    key: "command",
-    minWidth: 140,
-    ellipsis: {
-      tooltip: true
-    }
-  },
-  {
-    title: "路由",
-    key: "path",
-    minWidth: 160,
-    render(row) {
-      return row.path || autoPathPreview(row.name);
-    }
-  },
-  {
-    title: "参数",
-    key: "args",
-    width: 90,
-    render(row) {
-      return h(
-        NTag,
-        { bordered: false, type: "info" },
-        { default: () => `${Array.isArray(row.args) ? row.args.length : 0} 项` }
-      );
-    }
-  },
-  {
-    title: "环境变量",
-    key: "env",
-    width: 100,
-    render(row) {
-      return h(
-        NTag,
-        { bordered: false, type: "default" },
-        { default: () => `${row.env ? Object.keys(row.env).length : 0} 项` }
-      );
-    }
-  },
-  {
-    title: "描述",
-    key: "description",
-    minWidth: 220,
-    ellipsis: {
-      tooltip: true
-    },
-    render(row) {
-      return row.description || "-";
-    }
-  },
-  {
-    title: "操作",
-    key: "actions",
-    width: 320,
-    render: row =>
-      h("div", { class: "action-cell" }, [
-        h(
-          NButton,
-          {
-            size: "small",
-            secondary: true,
-            loading: testingKey.value === row.rowKey,
-            onClick: () => testServer(row.index)
-          },
-          { default: () => "测试" }
-        ),
-        h(
-          NButton,
-          { size: "small", secondary: true, onClick: () => copyText(row.path || autoPathPreview(row.name), "路由已复制") },
-          { default: () => "复制路由" }
-        ),
-        h(
-          NButton,
-          { size: "small", type: "primary", onClick: () => openEditModal(row.index) },
-          { default: () => "编辑" }
-        ),
-        h(
-          NButton,
-          { size: "small", secondary: true, onClick: () => duplicateServer(row.index) },
-          { default: () => "复制" }
-        ),
-        h(
-          NButton,
-          {
-            size: "small",
-            type: "error",
-            ghost: true,
-            onClick: () => removeServer(row.index)
-          },
-          { default: () => "删除" }
-        )
-      ])
-  }
-];
-
-const routeColumns = [
-  {
-    title: "名称",
-    key: "name",
-    minWidth: 160
-  },
-  {
-    title: "状态",
-    key: "ready",
-    width: 100,
-    render(row) {
-      return h(
-        NTag,
-        { type: row.ready ? "success" : "error", bordered: false },
-        { default: () => (row.ready ? "已就绪" : "未就绪") }
-      );
-    }
-  },
-  {
-    title: "路径",
-    key: "path",
-    minWidth: 160
-  },
-  {
-    title: "后端",
-    key: "backendName",
-    minWidth: 180,
-    render(row) {
-      const name = row.backendName || "-";
-      const version = row.backendVersion || "";
-      return `${name} ${version}`.trim();
-    }
-  },
-  {
-    title: "错误",
-    key: "lastError",
-    minWidth: 200,
-    ellipsis: {
-      tooltip: true
-    },
-    render(row) {
-      return row.lastError || "-";
-    }
-  },
-  {
-    title: "操作",
-    key: "routeActions",
-    width: 140,
-    render(row) {
-      return h(
-        NButton,
-        {
-          size: "small",
-          secondary: true,
-          onClick: () => copyRouteEndpoint(row.path)
-        },
-        { default: () => "复制入口" }
-      );
-    }
-  }
-];
 
 function setStatus(messageText, type = "") {
   statusMessage.value = messageText;
   statusType.value = type;
 }
 
-function autoPathPreview(name) {
-  const slug = String(name || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "server";
-  return `/mcp/${slug}`;
-}
-
-function stringifyConfig(config) {
-  return `${JSON.stringify(config, null, 2)}\n`;
-}
-
-function configFromServers(list) {
-  const mcpServers = {};
-  for (const server of list) {
-    const name = String(server.name || "").trim();
-    if (!name) {
-      continue;
-    }
-
-    const item = {
-      enabled: server.enabled !== false,
-      command: String(server.command || "").trim(),
-      args: Array.isArray(server.args) ? server.args.filter(Boolean) : [],
-      description: server.description || "",
-      timeout: Number.isFinite(server.timeout) ? server.timeout : 60000
-    };
-
-    if (server.path) {
-      item.path = String(server.path).trim();
-    }
-    if (server.env && Object.keys(server.env).length > 0) {
-      item.env = server.env;
-    }
-
-    mcpServers[name] = item;
-  }
-
-  return { mcpServers };
+function buildPreviewContent(list) {
+  const origin = window.location.origin || "";
+  return stringifyConfig(buildAgentConfigPayload(list, origin));
 }
 
 async function reloadConfig() {
@@ -490,21 +206,6 @@ async function reloadConfig() {
   }
 }
 
-function parseConfigContent(content) {
-  const parsed = JSON.parse(content || "{}");
-  const source = parsed.mcpServers || {};
-  return Object.entries(source).map(([name, value]) => ({
-    name,
-    enabled: value.enabled !== false,
-    command: value.command || "",
-    path: value.path || "",
-    description: value.description || "",
-    timeout: typeof value.timeout === "number" ? value.timeout : 60000,
-    args: Array.isArray(value.args) ? value.args : [],
-    env: value.env && typeof value.env === "object" ? value.env : {}
-  }));
-}
-
 function openCreateModal() {
   editingIndex.value = -1;
   editingServer.value = null;
@@ -517,12 +218,13 @@ function openEditModal(index) {
   editorVisible.value = true;
 }
 
-function duplicateServer(index) {
+function openDuplicateCreateModal(index) {
   const source = JSON.parse(JSON.stringify(servers.value[index]));
   source.name = source.name ? `${source.name}-copy` : "";
   source.path = "";
-  servers.value.splice(index + 1, 0, source);
-  message.success("已复制 MCP");
+  editingIndex.value = -1;
+  editingServer.value = source;
+  editorVisible.value = true;
 }
 
 function handleSaveServer(server) {
@@ -571,14 +273,33 @@ async function copyText(text, successMessage) {
   try {
     await navigator.clipboard.writeText(text);
     message.success(successMessage);
-  } catch (error) {
+  } catch {
     message.error("复制失败，请检查浏览器权限");
   }
 }
 
-function copyRouteEndpoint(path) {
+function handleCopyEndpoint(row) {
   const origin = window.location.origin || "";
-  copyText(`${origin}${path}`, "HTTP 入口已复制");
+  copyText(`${origin}${row.resolvedPath || resolveServerPath(row)}`, "HTTP 入口已复制");
+}
+
+function openAgentConfigPreview(row) {
+  previewTitle.value = `预览 ${row.name || "当前 MCP"} 的 Agent 配置`;
+  previewContent.value = buildPreviewContent([row]);
+  previewSuccessMessage.value = "Agent 配置已复制";
+  previewVisible.value = true;
+}
+
+function openAllAgentConfigPreview() {
+  previewTitle.value = "预览全部启用 MCP 的 Agent 配置";
+  previewContent.value = buildPreviewContent(servers.value);
+  previewSuccessMessage.value = "全部 Agent 配置已复制";
+  previewVisible.value = true;
+}
+
+async function copyPreviewContent() {
+  await copyText(previewContent.value, previewSuccessMessage.value);
+  previewVisible.value = false;
 }
 
 async function testServer(index) {
@@ -652,16 +373,43 @@ reloadConfig();
 .page {
   min-height: 100vh;
   padding: 24px;
-  background: #0b1220;
-  color: #e5e7eb;
+  background: var(--page-bg);
+  color: var(--text-color);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.page.theme-light {
+  --page-bg: #f3f6fb;
+  --panel-bg: #ffffff;
+  --border-color: #dbe4f0;
+  --text-color: #0f172a;
+  --muted-text: #64748b;
+  --shadow-color: rgba(15, 23, 42, 0.08);
+  --status-ok: #059669;
+  --status-warn: #d97706;
+  --status-error: #dc2626;
+  --status-neutral: #64748b;
+}
+
+.page.theme-dark {
+  --page-bg: #0b1220;
+  --panel-bg: #111827;
+  --border-color: #243041;
+  --text-color: #e5e7eb;
+  --muted-text: #94a3b8;
+  --shadow-color: rgba(0, 0, 0, 0.18);
+  --status-ok: #34d399;
+  --status-warn: #fbbf24;
+  --status-error: #f87171;
+  --status-neutral: #cbd5e1;
 }
 
 .card {
-  background: #111827;
-  border: 1px solid #243041;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
   border-radius: 16px;
   padding: 20px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 10px 30px var(--shadow-color);
 }
 
 .hero {
@@ -669,33 +417,44 @@ reloadConfig();
   margin-bottom: 16px;
 }
 
-.hero h1,
-.section-head h2 {
+.hero-content {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.hero h1 {
   margin: 0 0 8px;
 }
 
-.hero p,
-.section-head p {
+.hero p {
   margin: 0;
-  color: #94a3b8;
+  color: var(--muted-text);
   line-height: 1.7;
 }
 
-.dirty-alert {
-  margin-bottom: 16px;
+.theme-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
+.theme-label {
+  color: var(--muted-text);
+  font-size: 13px;
+}
+
+.dirty-alert,
 .empty-alert {
   margin-bottom: 16px;
 }
 
-.summary-grid,
-.content-grid {
+.summary-grid {
   display: grid;
   gap: 16px;
-}
-
-.summary-grid {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-bottom: 16px;
 }
@@ -705,7 +464,7 @@ reloadConfig();
 }
 
 .summary-title {
-  color: #94a3b8;
+  color: var(--muted-text);
   font-size: 13px;
   margin-bottom: 10px;
 }
@@ -718,7 +477,7 @@ reloadConfig();
 
 .summary-meta {
   margin-top: 8px;
-  color: #94a3b8;
+  color: var(--muted-text);
   font-size: 12px;
   line-height: 1.5;
   word-break: break-word;
@@ -730,111 +489,24 @@ reloadConfig();
 }
 
 .summary-status.ok {
-  color: #34d399;
+  color: var(--status-ok);
 }
 
 .summary-status.warn {
-  color: #fbbf24;
+  color: var(--status-warn);
 }
 
 .summary-status.error {
-  color: #f87171;
+  color: var(--status-error);
 }
 
 .summary-status.neutral {
-  color: #cbd5e1;
-}
-
-.content-grid {
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-}
-
-.section-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.section-actions,
-.table-toolbar {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.table-toolbar {
-  margin-bottom: 16px;
-}
-
-.table-toolbar-filters {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  width: min(540px, 100%);
-  flex-wrap: wrap;
-}
-
-:deep(.n-data-table) {
-  background: transparent;
-}
-
-:deep(.n-data-table-th) {
-  background: #0f172a;
-}
-
-.action-cell {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.table-empty {
-  padding: 24px 0;
-}
-
-.empty-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-
-.empty-desc {
-  color: #94a3b8;
-  line-height: 1.6;
-}
-
-.empty-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: center;
-  flex-wrap: wrap;
+  color: var(--status-neutral);
 }
 
 @media (max-width: 1200px) {
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .content-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 900px) {
-  .section-head {
-    flex-direction: column;
-  }
-
-  .section-actions,
-  .table-toolbar {
-    width: 100%;
-  }
-
-  .table-toolbar-filters {
-    width: 100%;
   }
 }
 
@@ -845,6 +517,10 @@ reloadConfig();
 
   .hero {
     display: block;
+  }
+
+  .hero-content {
+    flex-direction: column;
   }
 
   .summary-grid {
