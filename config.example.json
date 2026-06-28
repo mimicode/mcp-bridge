@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "enabled": true,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp"
+      ],
+      "description": "Expose local filesystem MCP over Streamable HTTP",
+      "timeout": 60000
+    },
+    "fetch": {
+      "enabled": true,
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch",
+        "--ignore-robots-txt"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      },
+      "description": "Expose fetch MCP over Streamable HTTP",
+      "timeout": 60000
+    }
+  }
+}
